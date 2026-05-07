@@ -6,7 +6,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 
-const BUILTINS: &[&str] = &["echo", "exit", "type", "pwd"];
+const BUILTINS: &[&str] = &["echo", "exit", "type", "pwd", "cd"];
 
 #[derive(PartialEq, Debug)]
 enum Action {
@@ -58,6 +58,14 @@ fn pwd() -> String{
     }
 }
 
+// assume args is abs path for now.
+fn cd(arg: &str) -> String{
+    match env::set_current_dir(Path::new(&arg)){
+        Ok(_) => "".to_string(),
+        Err(e) => format!("cd: {}: No such file or directory", arg)
+    }
+}
+
 fn handle_command(command: &str, path: &str) -> (String, Action) {
     let command = command.trim();
     let (head, rest) = command.split_once(' ').unwrap_or((command, ""));
@@ -66,6 +74,7 @@ fn handle_command(command: &str, path: &str) -> (String, Action) {
         "echo" => (format!("{}\n", rest), Action::Continue),
         "type" => (builtin_type(rest, path), Action::Continue),
         "pwd" => (pwd(), Action::Continue),
+        "cd" => (cd(rest), Action::Continue),
         _ => (run_external(command, path), Action::Continue),
     }
 }

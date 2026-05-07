@@ -1,0 +1,13 @@
+Workflow:
+
+Work on master, commit, codecrafters submit.
+Sync to GitHub:
+
+git checkout main
+git merge master --ff-only
+git push origin main
+git checkout master
+Rules:
+
+Only commit on master, never on main.
+If --ff-only ever fails, stop and investigate — don't force it.
