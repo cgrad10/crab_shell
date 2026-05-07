@@ -32,6 +32,23 @@ fn handle_command(command: &str, path: &str) -> (String, Action) {
     } else if command == "exit" {
         (String::new(), Action::Exit)
     } else {
+        let mut parts = command.split_whitespace();
+        let program = parts.next().unwrap_or("");
+        let args: Vec<&str> = parts.collect();
+        for dir in path.split(":") {
+            let filepath = Path::new(dir).join(program);
+            if let Ok(metadata) = fs::metadata(&filepath) {
+                if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                    let output = std::process::Command::new(&filepath)
+                        .args(&args)
+                        .output();
+                    return match output {
+                        Ok(o) => (String::from_utf8_lossy(&o.stdout).into_owned(), Action::Continue),
+                        Err(e) => (format!("{}: {}\n", program, e), Action::Continue),
+                    };
+                }
+            }
+        }
         (format!("{}: command not found\n", command), Action::Continue)
     }
 }
