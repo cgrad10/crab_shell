@@ -1,9 +1,12 @@
 #[allow(unused_imports)]
+use std::env;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+
+const BUILTINS: &[&str] = &["echo", "exit", "type"];
 
 #[derive(PartialEq, Debug)]
 enum Action {
@@ -11,61 +14,77 @@ enum Action {
     Exit,
 }
 
-fn handle_command(command: &str, path: &str) -> (String, Action) {
-    let command = command.trim();
-    if command.starts_with("type ") {
-        let substring = &command[5..];
-        if substring == "echo" || substring == "exit" || substring == "type" {
-            (format!("{} is a shell builtin\n", substring), Action::Continue)
-        } else {
-            for dir in path.split(":") {
-                let filepath = Path::new(dir).join(substring);
-                if let Ok(metadata) = fs::metadata(&filepath) {
-                    if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-                        return (format!("{} is {}\n", substring, filepath.display()), Action::Continue);
-                    }
-                }
-            }
-            (format!("{}: not found\n", substring), Action::Continue)
-        }
-    } else if command.starts_with("echo ") {
-        (format!("{}\n", &command[5..]), Action::Continue)
-    } else if command == "exit" {
-        (String::new(), Action::Exit)
+fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
+    path.split(':')
+        .map(|dir| Path::new(dir).join(program))
+        .find(|p| {
+            fs::metadata(p)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+fn builtin_type(arg: &str, path: &str) -> String {
+    if BUILTINS.contains(&arg) {
+        format!("{} is a shell builtin\n", arg)
+    } else if let Some(filepath) = find_in_path(arg, path) {
+        format!("{} is {}\n", arg, filepath.display())
     } else {
-        let mut parts = command.split_whitespace();
-        let program = parts.next().unwrap_or("");
-        let args: Vec<&str> = parts.collect();
-        for dir in path.split(":") {
-            let filepath = Path::new(dir).join(program);
-            if let Ok(metadata) = fs::metadata(&filepath) {
-                if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-                    let output = std::process::Command::new(&filepath)
-                        .arg0(program)
-                        .args(&args)
-                        .output();
-                    return match output {
-                        Ok(o) => (String::from_utf8_lossy(&o.stdout).into_owned(), Action::Continue),
-                        Err(e) => (format!("{}: {}\n", program, e), Action::Continue),
-                    };
-                }
-            }
-        }
-        (format!("{}: command not found\n", command), Action::Continue)
+        format!("{}: not found\n", arg)
     }
 }
 
-fn main() {
+fn run_external(command: &str, path: &str) -> String {
+    let mut parts = command.split_whitespace();
+    let program = parts.next().unwrap_or("");
+    let args: Vec<&str> = parts.collect();
+    let Some(filepath) = find_in_path(program, path) else {
+        return format!("{}: command not found\n", command);
+    };
+    match std::process::Command::new(&filepath)
+        .arg0(program)
+        .args(&args)
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(e) => format!("{}: {}\n", program, e),
+    }
+}
 
-    let path = std::env::var("PATH").unwrap_or("".to_string());
-    loop{
-        print!("$ ");
-        io::stdout().flush().unwrap();
-        let mut command = String::new();
-        io::stdin().read_line(&mut command).unwrap();
+fn pwd() -> String{
+    match env::current_dir(){
+        Ok(o) => format!("{}\n", o.display()),
+        Err(e) => format!("{}\n", e)
+    }
+}
+
+fn handle_command(command: &str, path: &str) -> (String, Action) {
+    let command = command.trim();
+    let (head, rest) = command.split_once(' ').unwrap_or((command, ""));
+    match head {
+        "exit" => (String::new(), Action::Exit),
+        "echo" => (format!("{}\n", rest), Action::Continue),
+        "type" => (builtin_type(rest, path), Action::Continue),
+        "pwd" => (pwd(), Action::Continue),
+        _ => (run_external(command, path), Action::Continue),
+    }
+}
+
+fn read_line() -> String {
+    print!("$ ");
+    io::stdout().flush().unwrap();
+    let mut command = String::new();
+    io::stdin().read_line(&mut command).unwrap();
+    command
+}
+
+fn main() {
+    let path = std::env::var("PATH").unwrap_or_default();
+    loop {
+        let command = read_line();
         let (out, action) = handle_command(&command, &path);
         print!("{}", out);
-        if let Action::Exit = action {
+        if action == Action::Exit {
             break;
         }
     }
@@ -75,36 +94,124 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn write_executable(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let p = dir.join(name);
+        fs::write(&p, script).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn write_non_executable(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        fs::write(&p, "").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
+        p
+    }
 
     #[test]
     fn test_echo_returns_continue_and_expected_characters_with_newline() {
-        //arrange
-        let input: &str = "echo pineapple blueberry orange";
-        //act
-        let (output_result, action_result) = handle_command(input, "");
-        //assert
-        assert_eq!(output_result, "pineapple blueberry orange\n");
-        assert_eq!(action_result, Action::Continue);
+        let (output, action) = handle_command("echo pineapple blueberry orange", "");
+        assert_eq!(output, "pineapple blueberry orange\n");
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn test_echo_with_no_args_returns_just_newline() {
+        let (output, action) = handle_command("echo", "");
+        assert_eq!(output, "\n");
+        assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_invalid_command_returns_continue_and_command_not_found_message() {
-        //arrange
-        let input: &str = "invalid_apple_command";
-        //act
-        let (output_result, action_result) = handle_command(input, "");
-        //assert
-        assert_eq!(output_result, "invalid_apple_command: command not found\n");
-        assert_eq!(action_result, Action::Continue);
+        let (output, action) = handle_command("invalid_apple_command", "");
+        assert_eq!(output, "invalid_apple_command: command not found\n");
+        assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_exit_returns_exit() {
-        //arrange
-        let input: &str = "exit";
-        //act
-        let (_output_result, action_result) = handle_command(input, "");
-        //assert
-        assert_eq!(action_result, Action::Exit);
+        let (_output, action) = handle_command("exit", "");
+        assert_eq!(action, Action::Exit);
+    }
+
+    #[test]
+    fn test_handle_command_trims_whitespace_and_newline() {
+        let (output, action) = handle_command("   echo hi  \n", "");
+        assert_eq!(output, "hi\n");
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn test_type_reports_each_builtin_as_shell_builtin() {
+        for builtin in ["echo", "exit", "type"] {
+            let (output, action) = handle_command(&format!("type {}", builtin), "");
+            assert_eq!(output, format!("{} is a shell builtin\n", builtin));
+            assert_eq!(action, Action::Continue);
+        }
+    }
+
+    #[test]
+    fn test_type_reports_not_found_for_unknown_command() {
+        let (output, action) = handle_command("type definitely_not_a_real_cmd", "");
+        assert_eq!(output, "definitely_not_a_real_cmd: not found\n");
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn test_type_finds_executable_in_path() {
+        let tmp = TempDir::new().unwrap();
+        let exe = write_executable(tmp.path(), "my_tool", "#!/bin/sh\n");
+        let path = tmp.path().to_string_lossy();
+        let (output, _) = handle_command("type my_tool", &path);
+        assert_eq!(output, format!("my_tool is {}\n", exe.display()));
+    }
+
+    #[test]
+    fn test_type_skips_non_executable_file() {
+        let tmp = TempDir::new().unwrap();
+        write_non_executable(tmp.path(), "not_runnable");
+        let path = tmp.path().to_string_lossy();
+        let (output, _) = handle_command("type not_runnable", &path);
+        assert_eq!(output, "not_runnable: not found\n");
+    }
+
+    #[test]
+    fn test_find_in_path_returns_none_for_missing_program() {
+        assert!(find_in_path("totally_made_up_program", "/nonexistent_dir_xyz").is_none());
+    }
+
+    #[test]
+    fn test_find_in_path_handles_empty_path() {
+        assert!(find_in_path("anything", "").is_none());
+    }
+
+    #[test]
+    fn test_find_in_path_searches_multiple_directories() {
+        let tmp = TempDir::new().unwrap();
+        let exe = write_executable(tmp.path(), "found_me", "#!/bin/sh\n");
+        let path = format!("/nonexistent_a:{}:/nonexistent_b", tmp.path().display());
+        assert_eq!(find_in_path("found_me", &path).unwrap(), exe);
+    }
+
+    #[test]
+    fn test_run_external_executes_program_and_returns_stdout() {
+        let tmp = TempDir::new().unwrap();
+        write_executable(tmp.path(), "say_hi", "#!/bin/sh\necho hello world\n");
+        let path = tmp.path().to_string_lossy();
+        let (output, action) = handle_command("say_hi", &path);
+        assert_eq!(output, "hello world\n");
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn test_run_external_passes_arguments() {
+        let tmp = TempDir::new().unwrap();
+        write_executable(tmp.path(), "echo_args", "#!/bin/sh\necho \"$1-$2\"\n");
+        let path = tmp.path().to_string_lossy();
+        let (output, _) = handle_command("echo_args foo bar", &path);
+        assert_eq!(output, "foo-bar\n");
     }
 }
