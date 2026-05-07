@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 
 #[derive(PartialEq, Debug)]
 enum Action {
@@ -40,6 +41,7 @@ fn handle_command(command: &str, path: &str) -> (String, Action) {
             if let Ok(metadata) = fs::metadata(&filepath) {
                 if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
                     let output = std::process::Command::new(&filepath)
+                        .arg0(program)
                         .args(&args)
                         .output();
                     return match output {
