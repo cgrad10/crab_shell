@@ -58,15 +58,22 @@ fn pwd() -> String{
     }
 }
 
-// assume args is abs path for now.
-fn cd(arg: &str) -> String{
-    match env::set_current_dir(Path::new(&arg)){
-        Ok(_) => "".to_string(),
-        Err(e) => format!("cd: {}: No such file or directory\n", arg)
+fn cd(arg: &str, home: &str) -> String{
+    if arg == "~"{
+        match env::set_current_dir(Path::new(&home)){
+            Ok(_) => "".to_string(),
+            Err(e) => format!("cd: {}: No such file or directory\n", arg)
+        }
+    }
+    else {
+        match env::set_current_dir(Path::new(&arg)){
+            Ok(_) => "".to_string(),
+            Err(e) => format!("cd: {}: No such file or directory\n", arg)
+        }
     }
 }
 
-fn handle_command(command: &str, path: &str) -> (String, Action) {
+fn handle_command(command: &str, path: &str, home: &str) -> (String, Action) {
     let command = command.trim();
     let (head, rest) = command.split_once(' ').unwrap_or((command, ""));
     match head {
@@ -74,7 +81,7 @@ fn handle_command(command: &str, path: &str) -> (String, Action) {
         "echo" => (format!("{}\n", rest), Action::Continue),
         "type" => (builtin_type(rest, path), Action::Continue),
         "pwd" => (pwd(), Action::Continue),
-        "cd" => (cd(rest), Action::Continue),
+        "cd" => (cd(rest, home), Action::Continue),
         _ => (run_external(command, path), Action::Continue),
     }
 }
@@ -89,9 +96,10 @@ fn read_line() -> String {
 
 fn main() {
     let path = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
     loop {
         let command = read_line();
-        let (out, action) = handle_command(&command, &path);
+        let (out, action) = handle_command(&command, &path, &home);
         print!("{}", out);
         if action == Action::Exit {
             break;
@@ -121,34 +129,34 @@ mod tests {
 
     #[test]
     fn test_echo_returns_continue_and_expected_characters_with_newline() {
-        let (output, action) = handle_command("echo pineapple blueberry orange", "");
+        let (output, action) = handle_command("echo pineapple blueberry orange", "", "");
         assert_eq!(output, "pineapple blueberry orange\n");
         assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_echo_with_no_args_returns_just_newline() {
-        let (output, action) = handle_command("echo", "");
+        let (output, action) = handle_command("echo", "", "");
         assert_eq!(output, "\n");
         assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_invalid_command_returns_continue_and_command_not_found_message() {
-        let (output, action) = handle_command("invalid_apple_command", "");
+        let (output, action) = handle_command("invalid_apple_command", "", "");
         assert_eq!(output, "invalid_apple_command: command not found\n");
         assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_exit_returns_exit() {
-        let (_output, action) = handle_command("exit", "");
+        let (_output, action) = handle_command("exit", "", "");
         assert_eq!(action, Action::Exit);
     }
 
     #[test]
     fn test_handle_command_trims_whitespace_and_newline() {
-        let (output, action) = handle_command("   echo hi  \n", "");
+        let (output, action) = handle_command("   echo hi  \n", "", "");
         assert_eq!(output, "hi\n");
         assert_eq!(action, Action::Continue);
     }
@@ -156,7 +164,7 @@ mod tests {
     #[test]
     fn test_type_reports_each_builtin_as_shell_builtin() {
         for builtin in ["echo", "exit", "type"] {
-            let (output, action) = handle_command(&format!("type {}", builtin), "");
+            let (output, action) = handle_command(&format!("type {}", builtin), "", "");
             assert_eq!(output, format!("{} is a shell builtin\n", builtin));
             assert_eq!(action, Action::Continue);
         }
@@ -164,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_type_reports_not_found_for_unknown_command() {
-        let (output, action) = handle_command("type definitely_not_a_real_cmd", "");
+        let (output, action) = handle_command("type definitely_not_a_real_cmd", "", "");
         assert_eq!(output, "definitely_not_a_real_cmd: not found\n");
         assert_eq!(action, Action::Continue);
     }
@@ -174,7 +182,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let exe = write_executable(tmp.path(), "my_tool", "#!/bin/sh\n");
         let path = tmp.path().to_string_lossy();
-        let (output, _) = handle_command("type my_tool", &path);
+        let (output, _) = handle_command("type my_tool", &path, "");
         assert_eq!(output, format!("my_tool is {}\n", exe.display()));
     }
 
@@ -183,7 +191,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_non_executable(tmp.path(), "not_runnable");
         let path = tmp.path().to_string_lossy();
-        let (output, _) = handle_command("type not_runnable", &path);
+        let (output, _) = handle_command("type not_runnable", &path, "");
         assert_eq!(output, "not_runnable: not found\n");
     }
 
@@ -210,7 +218,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_executable(tmp.path(), "say_hi", "#!/bin/sh\necho hello world\n");
         let path = tmp.path().to_string_lossy();
-        let (output, action) = handle_command("say_hi", &path);
+        let (output, action) = handle_command("say_hi", &path, "");
         assert_eq!(output, "hello world\n");
         assert_eq!(action, Action::Continue);
     }
@@ -220,7 +228,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_executable(tmp.path(), "echo_args", "#!/bin/sh\necho \"$1-$2\"\n");
         let path = tmp.path().to_string_lossy();
-        let (output, _) = handle_command("echo_args foo bar", &path);
+        let (output, _) = handle_command("echo_args foo bar", &path, "");
         assert_eq!(output, "foo-bar\n");
     }
 }
