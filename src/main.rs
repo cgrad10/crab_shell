@@ -39,7 +39,6 @@ fn handle_command(command: &str, path: &str) -> (String, Action) {
 fn main() {
 
     let path = std::env::var("PATH").unwrap_or("".to_string());
-    println!("{}", path);
     loop{
         print!("$ ");
         io::stdout().flush().unwrap();
