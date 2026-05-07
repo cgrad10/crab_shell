@@ -62,7 +62,7 @@ fn pwd() -> String{
 fn cd(arg: &str) -> String{
     match env::set_current_dir(Path::new(&arg)){
         Ok(_) => "".to_string(),
-        Err(e) => format!("cd: {}: No such file or directory", arg)
+        Err(e) => format!("cd: {}: No such file or directory\n", arg)
     }
 }
 
