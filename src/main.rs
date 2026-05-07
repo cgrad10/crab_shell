@@ -6,7 +6,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 
-const BUILTINS: &[&str] = &["echo", "exit", "type"];
+const BUILTINS: &[&str] = &["echo", "exit", "type", "pwd"];
 
 #[derive(PartialEq, Debug)]
 enum Action {
