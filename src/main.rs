@@ -87,15 +87,22 @@ fn parse(input: &str) -> Vec<String> {
     let mut in_s_q = false;
     let mut in_d_q = false;
     let mut active = false;
+    let mut escape = false;
 
-    // need to adjust this for double quotes...
-    // if in double quotes - 
     for c in input.chars() {
+        if escape {
+            if in_d_q && !matches!(c, '\\' | '$' | '"' | '\n') {
+                cur.push('\\');
+            }
+            cur.push(c);
+            active = true;
+            escape = false;
+            continue;
+        }
         match c {
-            '\"' if !in_s_q => { in_d_q = !in_d_q; active = true; }
-            '\"' => { cur.push(c); active = true; }
+            '\\' if !in_s_q => { escape = true; }
+            '"' if !in_s_q => { in_d_q = !in_d_q; active = true; }
             '\'' if !in_d_q => { in_s_q = !in_s_q; active = true; }
-            '\'' => { cur.push(c); active = true; }
             c if c.is_whitespace() && !in_s_q && !in_d_q => {
                 if active { args.push(std::mem::take(&mut cur)); active = false; }
             }
