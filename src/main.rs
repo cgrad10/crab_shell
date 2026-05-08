@@ -84,13 +84,26 @@ fn cd(arg: &str, shell: &ShellEnv) -> String {
 fn parse(input: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut cur = String::new();
-    let mut in_q = false;
+    let mut in_s_q = false;
+    let mut in_d_q = false;
     let mut active = false;
+    let mut escape = false;
 
     for c in input.chars() {
+        if escape {
+            if in_d_q && !matches!(c, '\\' | '$' | '"' | '\n') {
+                cur.push('\\');
+            }
+            cur.push(c);
+            active = true;
+            escape = false;
+            continue;
+        }
         match c {
-            '\'' => { in_q = !in_q; active = true; }
-            c if c.is_whitespace() && !in_q => {
+            '\\' if !in_s_q => { escape = true; }
+            '"' if !in_s_q => { in_d_q = !in_d_q; active = true; }
+            '\'' if !in_d_q => { in_s_q = !in_s_q; active = true; }
+            c if c.is_whitespace() && !in_s_q && !in_d_q => {
                 if active { args.push(std::mem::take(&mut cur)); active = false; }
             }
             c => { cur.push(c); active = true; }
