@@ -39,19 +39,23 @@ fn builtin_type(arg: &str, shell: &ShellEnv) -> String {
     }
 }
 
-fn run_external(command: &str, shell: &ShellEnv) -> String {
-    let mut parts = command.split_whitespace();
-    let program = parts.next().unwrap_or("");
-    let args: Vec<&str> = parts.collect();
+fn run_external(args: &[String], shell: &ShellEnv) -> String {
+    let Some((program, rest)) = args.split_first() else {
+        return String::new();
+    };
     let Some(filepath) = find_in_path(program, &shell.path) else {
         return format!("{}: command not found\n", program);
     };
     match std::process::Command::new(&filepath)
         .arg0(program)
-        .args(&args)
+        .args(rest)
         .output()
     {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => {
+            let mut out = String::from_utf8_lossy(&o.stdout).into_owned();
+            out.push_str(&String::from_utf8_lossy(&o.stderr));
+            out
+        }
         Err(e) => format!("{}: {}\n", program, e),
     }
 }
@@ -77,25 +81,11 @@ fn cd(arg: &str, shell: &ShellEnv) -> String {
     }
 }
 
-fn is_single_quoted(s: &str) -> bool {
-    s.starts_with('\'') && s.ends_with('\'')
-}
-
-fn handle_single_quotes(s: &str) -> String{
-    // 'hello    world' -> hello   world
-    // hello    world -> hello world
-    if is_single_quoted(s){
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.split_whitespace().collect::<Vec<_>>().join(" ").to_string()
-    }
-}
-
-fn parse(input: &str) -> String {
+fn parse(input: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut cur = String::new();
     let mut in_q = false;
-    let mut active = false;  // is there a token in progress?
+    let mut active = false;
 
     for c in input.chars() {
         match c {
@@ -107,19 +97,21 @@ fn parse(input: &str) -> String {
         }
     }
     if active { args.push(cur); }
-    args.join(" ")
+    args
 }
 
 fn handle_command(command: &str, shell: &ShellEnv) -> (String, Action) {
-    let command = command.trim();
-    let (head, rest) = command.split_once(' ').unwrap_or((command, ""));
-    match head {
+    let args = parse(command.trim());
+    let Some((head, rest)) = args.split_first() else {
+        return (String::new(), Action::Continue);
+    };
+    match head.as_str() {
         "exit" => (String::new(), Action::Exit),
-        "echo" => (format!("{}\n", parse(rest)), Action::Continue),
-        "type" => (builtin_type(rest, shell), Action::Continue),
+        "echo" => (format!("{}\n", rest.join(" ")), Action::Continue),
+        "type" => (builtin_type(rest.first().map(String::as_str).unwrap_or(""), shell), Action::Continue),
         "pwd" => (pwd(), Action::Continue),
-        "cd" => (cd(rest, shell), Action::Continue),
-        _ => (run_external(&parse(command), shell), Action::Continue),
+        "cd" => (cd(rest.first().map(String::as_str).unwrap_or(""), shell), Action::Continue),
+        _ => (run_external(&args, shell), Action::Continue),
     }
 }
 
