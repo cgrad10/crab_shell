@@ -119,7 +119,7 @@ fn handle_command(command: &str, shell: &ShellEnv) -> (String, Action) {
         "type" => (builtin_type(rest, shell), Action::Continue),
         "pwd" => (pwd(), Action::Continue),
         "cd" => (cd(rest, shell), Action::Continue),
-        _ => (run_external(command, shell), Action::Continue),
+        _ => (run_external(parse(command), shell), Action::Continue),
     }
 }
 
