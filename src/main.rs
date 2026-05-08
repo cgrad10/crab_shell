@@ -84,13 +84,19 @@ fn cd(arg: &str, shell: &ShellEnv) -> String {
 fn parse(input: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut cur = String::new();
-    let mut in_q = false;
+    let mut in_s_q = false;
+    let mut in_d_q = false;
     let mut active = false;
 
+    // need to adjust this for double quotes...
+    // if in double quotes - 
     for c in input.chars() {
         match c {
-            '\'' => { in_q = !in_q; active = true; }
-            c if c.is_whitespace() && !in_q => {
+            '\"' if !in_s_q => { in_d_q = !in_d_q; active = true; }
+            '\"' => { cur.push(c); active = true; }
+            '\'' if !in_d_q => { in_s_q = !in_s_q; active = true; }
+            '\'' => { cur.push(c); active = true; }
+            c if c.is_whitespace() && !in_s_q && !in_d_q => {
                 if active { args.push(std::mem::take(&mut cur)); active = false; }
             }
             c => { cur.push(c); active = true; }
