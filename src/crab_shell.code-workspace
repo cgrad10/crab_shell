@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../codecrafters-shell-rust"
+		}
+	],
+	"settings": {}
+}

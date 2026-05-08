@@ -77,12 +77,26 @@ fn cd(arg: &str, shell: &ShellEnv) -> String {
     }
 }
 
+fn is_single_quoted(s: &str) -> bool {
+    s.starts_with('\'') && s.ends_with('\'')
+}
+
+fn handle_single_quotes(command: &str) -> String{
+    // 'hello    world' -> hello   world
+    // hello    world -> hello world
+    if is_single_quoted(command){
+        command.to_string()
+    } else {
+        command.split_whitespace().collect::<Vec<_>>().join(" ").to_string()
+    }
+}
+
 fn handle_command(command: &str, shell: &ShellEnv) -> (String, Action) {
     let command = command.trim();
     let (head, rest) = command.split_once(' ').unwrap_or((command, ""));
     match head {
         "exit" => (String::new(), Action::Exit),
-        "echo" => (format!("{}\n", rest), Action::Continue),
+        "echo" => (format!("{}\n", handle_single_quotes(rest)), Action::Continue),
         "type" => (builtin_type(rest, shell), Action::Continue),
         "pwd" => (pwd(), Action::Continue),
         "cd" => (cd(rest, shell), Action::Continue),
