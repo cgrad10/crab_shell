@@ -91,12 +91,31 @@ fn handle_single_quotes(s: &str) -> String{
     }
 }
 
+fn parse(input: &str) -> String {
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut active = false;  // is there a token in progress?
+
+    for c in input.chars() {
+        match c {
+            '\'' => { in_q = !in_q; active = true; }
+            c if c.is_whitespace() && !in_q => {
+                if active { args.push(std::mem::take(&mut cur)); active = false; }
+            }
+            c => { cur.push(c); active = true; }
+        }
+    }
+    if active { args.push(cur); }
+    args.join(" ")
+}
+
 fn handle_command(command: &str, shell: &ShellEnv) -> (String, Action) {
     let command = command.trim();
     let (head, rest) = command.split_once(' ').unwrap_or((command, ""));
     match head {
         "exit" => (String::new(), Action::Exit),
-        "echo" => (format!("{}\n", handle_single_quotes(rest)), Action::Continue),
+        "echo" => (format!("{}\n", parse(rest)), Action::Continue),
         "type" => (builtin_type(rest, shell), Action::Continue),
         "pwd" => (pwd(), Action::Continue),
         "cd" => (cd(rest, shell), Action::Continue),
