@@ -81,13 +81,13 @@ fn is_single_quoted(s: &str) -> bool {
     s.starts_with('\'') && s.ends_with('\'')
 }
 
-fn handle_single_quotes(command: &str) -> String{
+fn handle_single_quotes(s: &str) -> String{
     // 'hello    world' -> hello   world
     // hello    world -> hello world
-    if is_single_quoted(command){
-        command.to_string()
+    if is_single_quoted(s){
+        s[1..s.len() - 1].to_string()
     } else {
-        command.split_whitespace().collect::<Vec<_>>().join(" ").to_string()
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_string()
     }
 }
 
