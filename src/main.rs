@@ -1,9 +1,9 @@
 use std::env;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 
 const BUILTINS: &[&str] = &["echo", "exit", "type", "pwd", "cd"];
 
@@ -11,6 +11,40 @@ const BUILTINS: &[&str] = &["echo", "exit", "type", "pwd", "cd"];
 enum Action {
     Continue,
     Exit,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum RedirectKind {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, PartialEq)]
+struct Redirect {
+    kind: RedirectKind,
+    path: String,
+    append: bool,
+}
+
+struct CommandResult {
+    stdout: String,
+    stderr: String,
+    action: Action,
+    redirect: Option<Redirect>,
+}
+
+impl CommandResult {
+    fn cont() -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: String::new(),
+            action: Action::Continue,
+            redirect: None,
+        }
+    }
+    fn out(s: String) -> Self {
+        Self { stdout: s, ..Self::cont() }
+    }
 }
 
 #[derive(Default)]
@@ -39,24 +73,25 @@ fn builtin_type(arg: &str, shell: &ShellEnv) -> String {
     }
 }
 
-fn run_external(args: &[String], shell: &ShellEnv) -> String {
+fn run_external(args: &[String], shell: &ShellEnv) -> CommandResult {
     let Some((program, rest)) = args.split_first() else {
-        return String::new();
+        return CommandResult::cont();
     };
     let Some(filepath) = find_in_path(program, &shell.path) else {
-        return format!("{}: command not found\n", program);
+        return CommandResult::out(format!("{}: command not found\n", program));
     };
     match std::process::Command::new(&filepath)
         .arg0(program)
         .args(rest)
         .output()
     {
-        Ok(o) => {
-            let mut out = String::from_utf8_lossy(&o.stdout).into_owned();
-            out.push_str(&String::from_utf8_lossy(&o.stderr));
-            out
-        }
-        Err(e) => format!("{}: {}\n", program, e),
+        Ok(o) => CommandResult {
+            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+            action: Action::Continue,
+            redirect: None,
+        },
+        Err(e) => CommandResult::out(format!("{}: {}\n", program, e)),
     }
 }
 
@@ -113,18 +148,79 @@ fn parse(input: &str) -> Vec<String> {
     args
 }
 
-fn handle_command(command: &str, shell: &ShellEnv) -> (String, Action) {
-    let args = parse(command.trim());
-    let Some((head, rest)) = args.split_first() else {
-        return (String::new(), Action::Continue);
+fn split_redirect(tokens: Vec<String>) -> Result<(Vec<String>, Option<Redirect>), String> {
+    const OPS: &[(&str, RedirectKind, bool)] = &[
+        (">", RedirectKind::Stdout, false),
+        ("1>", RedirectKind::Stdout, false),
+        ("2>", RedirectKind::Stderr, false),
+        (">>", RedirectKind::Stdout, true),
+        ("1>>", RedirectKind::Stdout, true),
+        ("2>>", RedirectKind::Stderr, true),
+    ];
+
+    for (i, tok) in tokens.iter().enumerate() {
+        if let Some(&(_, kind, append)) = OPS.iter().find(|(op, _, _)| op == tok) {
+            let path = match tokens.get(i + 1) {
+                Some(p) => p.clone(),
+                None => return Err(format!("syntax error near unexpected token `{}`\n", tok)),
+            };
+            let mut cmd = tokens;
+            cmd.truncate(i);
+            return Ok((cmd, Some(Redirect { kind, path, append })));
+        }
+    }
+    Ok((tokens, None))
+}
+
+fn handle_command(command: &str, shell: &ShellEnv) -> CommandResult {
+    let tokens = parse(command.trim());
+    let (args, redirect) = match split_redirect(tokens) {
+        Ok(v) => v,
+        Err(msg) => {
+            return CommandResult { stderr: msg, ..CommandResult::cont() };
+        }
     };
-    match head.as_str() {
-        "exit" => (String::new(), Action::Exit),
-        "echo" => (format!("{}\n", rest.join(" ")), Action::Continue),
-        "type" => (builtin_type(rest.first().map(String::as_str).unwrap_or(""), shell), Action::Continue),
-        "pwd" => (pwd(), Action::Continue),
-        "cd" => (cd(rest.first().map(String::as_str).unwrap_or(""), shell), Action::Continue),
-        _ => (run_external(&args, shell), Action::Continue),
+    let Some((head, rest)) = args.split_first() else {
+        return CommandResult { redirect, ..CommandResult::cont() };
+    };
+    let mut result = match head.as_str() {
+        "exit" => CommandResult { action: Action::Exit, ..CommandResult::cont() },
+        "echo" => CommandResult::out(format!("{}\n", rest.join(" "))),
+        "type" => CommandResult::out(builtin_type(
+            rest.first().map(String::as_str).unwrap_or(""),
+            shell,
+        )),
+        "pwd" => CommandResult::out(pwd()),
+        "cd" => CommandResult::out(cd(
+            rest.first().map(String::as_str).unwrap_or(""),
+            shell,
+        )),
+        _ => run_external(&args, shell),
+    };
+    result.redirect = redirect;
+    result
+}
+
+fn write_stream(content: &str, redir: Option<&Redirect>, stream: RedirectKind) {
+    match redir {
+        Some(r) if r.kind == stream => {
+            let res = if r.append {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&r.path)
+                    .and_then(|mut f| f.write_all(content.as_bytes()))
+            } else {
+                fs::write(&r.path, content)
+            };
+            if let Err(e) = res {
+                eprintln!("{}: {}", r.path, e);
+            }
+        }
+        _ => match stream {
+            RedirectKind::Stdout => print!("{}", content),
+            RedirectKind::Stderr => eprint!("{}", content),
+        },
     }
 }
 
@@ -143,14 +239,15 @@ fn main() {
     };
     loop {
         let command = read_line();
-        let (out, action) = handle_command(&command, &shell);
-        print!("{}", out);
-        if action == Action::Exit {
+        let result = handle_command(&command, &shell);
+        write_stream(&result.stdout, result.redirect.as_ref(), RedirectKind::Stdout);
+        write_stream(&result.stderr, result.redirect.as_ref(), RedirectKind::Stderr);
+        io::stdout().flush().ok();
+        if result.action == Action::Exit {
             break;
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -162,6 +259,11 @@ mod tests {
 
     fn lock_cwd() -> std::sync::MutexGuard<'static, ()> {
         CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn run(input: &str, shell: &ShellEnv) -> (String, Action) {
+        let r = handle_command(input, shell);
+        (r.stdout, r.action)
     }
 
     fn write_executable(dir: &Path, name: &str, script: &str) -> PathBuf {
@@ -180,34 +282,34 @@ mod tests {
 
     #[test]
     fn test_echo_returns_continue_and_expected_characters_with_newline() {
-        let (output, action) = handle_command("echo pineapple blueberry orange", &ShellEnv::default());
+        let (output, action) = run("echo pineapple blueberry orange", &ShellEnv::default());
         assert_eq!(output, "pineapple blueberry orange\n");
         assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_echo_with_no_args_returns_just_newline() {
-        let (output, action) = handle_command("echo", &ShellEnv::default());
+        let (output, action) = run("echo", &ShellEnv::default());
         assert_eq!(output, "\n");
         assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_invalid_command_returns_continue_and_command_not_found_message() {
-        let (output, action) = handle_command("invalid_apple_command", &ShellEnv::default());
+        let (output, action) = run("invalid_apple_command", &ShellEnv::default());
         assert_eq!(output, "invalid_apple_command: command not found\n");
         assert_eq!(action, Action::Continue);
     }
 
     #[test]
     fn test_exit_returns_exit() {
-        let (_output, action) = handle_command("exit", &ShellEnv::default());
+        let (_output, action) = run("exit", &ShellEnv::default());
         assert_eq!(action, Action::Exit);
     }
 
     #[test]
     fn test_handle_command_trims_whitespace_and_newline() {
-        let (output, action) = handle_command("   echo hi  \n", &ShellEnv::default());
+        let (output, action) = run("   echo hi  \n", &ShellEnv::default());
         assert_eq!(output, "hi\n");
         assert_eq!(action, Action::Continue);
     }
@@ -215,7 +317,7 @@ mod tests {
     #[test]
     fn test_type_reports_each_builtin_as_shell_builtin() {
         for builtin in ["echo", "exit", "type"] {
-            let (output, action) = handle_command(&format!("type {}", builtin), &ShellEnv::default());
+            let (output, action) = run(&format!("type {}", builtin), &ShellEnv::default());
             assert_eq!(output, format!("{} is a shell builtin\n", builtin));
             assert_eq!(action, Action::Continue);
         }
@@ -223,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_type_reports_not_found_for_unknown_command() {
-        let (output, action) = handle_command("type definitely_not_a_real_cmd", &ShellEnv::default());
+        let (output, action) = run("type definitely_not_a_real_cmd", &ShellEnv::default());
         assert_eq!(output, "definitely_not_a_real_cmd: not found\n");
         assert_eq!(action, Action::Continue);
     }
@@ -233,7 +335,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let exe = write_executable(tmp.path(), "my_tool", "#!/bin/sh\n");
         let path = tmp.path().to_string_lossy();
-        let (output, _) = handle_command("type my_tool", &ShellEnv { path: path.into(), ..Default::default() });
+        let (output, _) = run("type my_tool", &ShellEnv { path: path.into(), ..Default::default() });
         assert_eq!(output, format!("my_tool is {}\n", exe.display()));
     }
 
@@ -242,7 +344,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_non_executable(tmp.path(), "not_runnable");
         let path = tmp.path().to_string_lossy();
-        let (output, _) = handle_command("type not_runnable", &ShellEnv { path: path.into(), ..Default::default() });
+        let (output, _) = run("type not_runnable", &ShellEnv { path: path.into(), ..Default::default() });
         assert_eq!(output, "not_runnable: not found\n");
     }
 
@@ -269,7 +371,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_executable(tmp.path(), "say_hi", "#!/bin/sh\necho hello world\n");
         let path = tmp.path().to_string_lossy();
-        let (output, action) = handle_command("say_hi", &ShellEnv { path: path.into(), ..Default::default() });
+        let (output, action) = run("say_hi", &ShellEnv { path: path.into(), ..Default::default() });
         assert_eq!(output, "hello world\n");
         assert_eq!(action, Action::Continue);
     }
@@ -279,15 +381,29 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_executable(tmp.path(), "echo_args", "#!/bin/sh\necho \"$1-$2\"\n");
         let path = tmp.path().to_string_lossy();
-        let (output, _) = handle_command("echo_args foo bar", &ShellEnv { path: path.into(), ..Default::default() });
+        let (output, _) = run("echo_args foo bar", &ShellEnv { path: path.into(), ..Default::default() });
         assert_eq!(output, "foo-bar\n");
+    }
+
+    #[test]
+    fn test_run_external_splits_stdout_and_stderr() {
+        let tmp = TempDir::new().unwrap();
+        write_executable(
+            tmp.path(),
+            "noisy",
+            "#!/bin/sh\necho to-out\necho to-err 1>&2\n",
+        );
+        let path = tmp.path().to_string_lossy();
+        let r = handle_command("noisy", &ShellEnv { path: path.into(), ..Default::default() });
+        assert_eq!(r.stdout, "to-out\n");
+        assert_eq!(r.stderr, "to-err\n");
     }
 
     #[test]
     fn test_pwd_returns_current_directory_with_newline() {
         let _guard = lock_cwd();
         let expected = format!("{}\n", env::current_dir().unwrap().display());
-        let (output, action) = handle_command("pwd", &ShellEnv::default());
+        let (output, action) = run("pwd", &ShellEnv::default());
         assert_eq!(output, expected);
         assert_eq!(action, Action::Continue);
     }
@@ -299,12 +415,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let target = fs::canonicalize(tmp.path()).unwrap();
 
-        let (output, action) =
-            handle_command(&format!("cd {}", target.display()), &ShellEnv::default());
+        let (output, action) = run(&format!("cd {}", target.display()), &ShellEnv::default());
         assert_eq!(output, "");
         assert_eq!(action, Action::Continue);
 
-        let (pwd_out, _) = handle_command("pwd", &ShellEnv::default());
+        let (pwd_out, _) = run("pwd", &ShellEnv::default());
         assert_eq!(pwd_out, format!("{}\n", target.display()));
 
         env::set_current_dir(original).unwrap();
@@ -313,8 +428,7 @@ mod tests {
     #[test]
     fn test_cd_invalid_path_returns_error_message() {
         let _guard = lock_cwd();
-        let (output, action) =
-            handle_command("cd /definitely_not_a_real_dir_apple_xyz", &ShellEnv::default());
+        let (output, action) = run("cd /definitely_not_a_real_dir_apple_xyz", &ShellEnv::default());
         assert_eq!(
             output,
             "cd: /definitely_not_a_real_dir_apple_xyz: No such file or directory\n"
@@ -330,11 +444,11 @@ mod tests {
         let home = fs::canonicalize(tmp.path()).unwrap();
         let home_str = home.to_string_lossy();
 
-        let (output, action) = handle_command("cd ~", &ShellEnv { home: home_str.into(), ..Default::default() });
+        let (output, action) = run("cd ~", &ShellEnv { home: home_str.into(), ..Default::default() });
         assert_eq!(output, "");
         assert_eq!(action, Action::Continue);
 
-        let (pwd_out, _) = handle_command("pwd", &ShellEnv::default());
+        let (pwd_out, _) = run("pwd", &ShellEnv::default());
         assert_eq!(pwd_out, format!("{}\n", home.display()));
 
         env::set_current_dir(original).unwrap();
@@ -350,11 +464,11 @@ mod tests {
         let home_str = home.to_string_lossy();
 
         let (output, action) =
-            handle_command("cd ~/sub", &ShellEnv { home: home_str.into(), ..Default::default() });
+            run("cd ~/sub", &ShellEnv { home: home_str.into(), ..Default::default() });
         assert_eq!(output, "");
         assert_eq!(action, Action::Continue);
 
-        let (pwd_out, _) = handle_command("pwd", &ShellEnv::default());
+        let (pwd_out, _) = run("pwd", &ShellEnv::default());
         assert_eq!(pwd_out, format!("{}\n", home.join("sub").display()));
 
         env::set_current_dir(original).unwrap();
@@ -363,9 +477,129 @@ mod tests {
     #[test]
     fn test_cd_tilde_with_invalid_home_returns_error() {
         let _guard = lock_cwd();
-        let (output, action) =
-            handle_command("cd ~", &ShellEnv { home: "/definitely_not_a_real_home_xyz_apple".into(), ..Default::default() });
+        let (output, action) = run(
+            "cd ~",
+            &ShellEnv { home: "/definitely_not_a_real_home_xyz_apple".into(), ..Default::default() },
+        );
         assert_eq!(output, "cd: ~: No such file or directory\n");
         assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn test_split_redirect_basic_stdout() {
+        let tokens = vec!["echo".into(), "hi".into(), ">".into(), "out.txt".into()];
+        let (cmd, redir) = split_redirect(tokens).unwrap();
+        assert_eq!(cmd, vec!["echo".to_string(), "hi".into()]);
+        let r = redir.unwrap();
+        assert_eq!(r.kind, RedirectKind::Stdout);
+        assert_eq!(r.path, "out.txt");
+        assert!(!r.append);
+    }
+
+    #[test]
+    fn test_split_redirect_1_prefix_is_stdout() {
+        let tokens = vec!["echo".into(), "1>".into(), "out.txt".into()];
+        let r = split_redirect(tokens).unwrap().1.unwrap();
+        assert_eq!(r.kind, RedirectKind::Stdout);
+    }
+
+    #[test]
+    fn test_split_redirect_stderr() {
+        let tokens = vec!["ls".into(), "2>".into(), "err.txt".into()];
+        let r = split_redirect(tokens).unwrap().1.unwrap();
+        assert_eq!(r.kind, RedirectKind::Stderr);
+        assert!(!r.append);
+    }
+
+    #[test]
+    fn test_split_redirect_append_variants() {
+        for (op, kind) in [
+            (">>", RedirectKind::Stdout),
+            ("1>>", RedirectKind::Stdout),
+            ("2>>", RedirectKind::Stderr),
+        ] {
+            let tokens = vec!["x".into(), op.into(), "p".into()];
+            let r = split_redirect(tokens).unwrap().1.unwrap();
+            assert!(r.append, "{} should be append", op);
+            assert_eq!(r.kind, kind);
+        }
+    }
+
+    #[test]
+    fn test_split_redirect_no_operator() {
+        let tokens = vec!["echo".into(), "hi".into()];
+        let (_, redir) = split_redirect(tokens).unwrap();
+        assert!(redir.is_none());
+    }
+
+    #[test]
+    fn test_split_redirect_missing_path_is_error() {
+        let tokens = vec!["echo".into(), ">".into()];
+        assert!(split_redirect(tokens).is_err());
+    }
+
+    #[test]
+    fn test_redirect_inside_double_quotes_is_literal() {
+        let r = handle_command("echo \"1 > 2\"", &ShellEnv::default());
+        assert_eq!(r.stdout, "1 > 2\n");
+        assert!(r.redirect.is_none());
+    }
+
+    #[test]
+    fn test_handle_command_attaches_redirect_to_result() {
+        let r = handle_command("echo hi > /tmp/out", &ShellEnv::default());
+        assert_eq!(r.stdout, "hi\n");
+        let redir = r.redirect.unwrap();
+        assert_eq!(redir.path, "/tmp/out");
+        assert_eq!(redir.kind, RedirectKind::Stdout);
+    }
+
+    #[test]
+    fn test_write_stream_writes_stdout_to_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("out.txt");
+        let redir = Redirect {
+            kind: RedirectKind::Stdout,
+            path: path.to_string_lossy().into(),
+            append: false,
+        };
+        write_stream("hello\n", Some(&redir), RedirectKind::Stdout);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn test_write_stream_append_appends_to_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("out.txt");
+        let redir = Redirect {
+            kind: RedirectKind::Stdout,
+            path: path.to_string_lossy().into(),
+            append: true,
+        };
+        write_stream("one\n", Some(&redir), RedirectKind::Stdout);
+        write_stream("two\n", Some(&redir), RedirectKind::Stderr); // mismatched stream, no-op for file
+        write_stream("three\n", Some(&redir), RedirectKind::Stdout);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\nthree\n");
+    }
+
+    #[test]
+    fn test_redirect_external_stderr_separately() {
+        let tmp = TempDir::new().unwrap();
+        write_executable(
+            tmp.path(),
+            "noisy",
+            "#!/bin/sh\necho to-out\necho to-err 1>&2\n",
+        );
+        let path = tmp.path().to_string_lossy();
+        let err_path = tmp.path().join("err.txt");
+        let r = handle_command(
+            &format!("noisy 2> {}", err_path.display()),
+            &ShellEnv { path: path.into(), ..Default::default() },
+        );
+        assert_eq!(r.stdout, "to-out\n");
+        let redir = r.redirect.as_ref().unwrap();
+        assert_eq!(redir.kind, RedirectKind::Stderr);
+        write_stream(&r.stderr, Some(redir), RedirectKind::Stderr);
+        assert_eq!(fs::read_to_string(&err_path).unwrap(), "to-err\n");
     }
 }
