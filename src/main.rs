@@ -55,7 +55,7 @@ impl CommandResult {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ShellEnv {
     path: String,
     home: String,
@@ -245,7 +245,23 @@ fn complete_builtin(line: &str, pos: usize) -> (usize, Vec<&'static str>) {
     (0, matches)
 }
 
-struct ShellHelper;
+fn complete_executables(line: &str, _pos: usize, shell: &ShellEnv) -> (usize, Vec<String>) {
+    let mut matches: Vec<String> = Vec::new();
+    for dir in shell.path.split(':') {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(line) {
+                matches.push(name);
+            }
+        }
+    }
+    (0, matches)
+}
+
+struct ShellHelper{
+    shellenv: ShellEnv
+}
 
 impl Completer for ShellHelper {
     type Candidate = Pair;
@@ -255,14 +271,23 @@ impl Completer for ShellHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let (_start2, names2) = complete_executables(line, pos, &self.shellenv);
         let (start, names) = complete_builtin(line, pos);
-        let candidates = names
+        let mut candidates: Vec<Pair> = names
             .into_iter()
             .map(|b| Pair {
                 display: b.to_string(),
                 replacement: format!("{} ", b),
             })
             .collect();
+        let other_candidates: Vec<Pair> = names2
+            .into_iter()
+            .map(|b| Pair {
+                display: b.clone(),
+                replacement: format!("{} ", b),
+            })
+            .collect();
+        candidates.extend(other_candidates);
         Ok((start, candidates))
     }
 }
@@ -281,7 +306,10 @@ fn main() {
     };
     let mut editor: Editor<ShellHelper, DefaultHistory> =
         Editor::new().expect("failed to initialize line editor");
-    editor.set_helper(Some(ShellHelper));
+    let shell_helper = ShellHelper{
+        shellenv: shell.clone()
+    };
+    editor.set_helper(Some(shell_helper));
 
     loop {
         let command = match editor.readline("$ ") {
