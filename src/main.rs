@@ -232,31 +232,30 @@ fn write_stream(content: &str, redir: Option<&Redirect>, stream: RedirectKind) {
     }
 }
 
-fn complete_builtin(line: &str, pos: usize) -> (usize, Vec<&'static str>) {
-    let prefix = line.get(..pos).unwrap_or("");
-    if prefix.chars().any(char::is_whitespace) {
-        return (pos, vec![]);
-    }
-    let matches: Vec<&'static str> = BUILTINS
-        .iter()
-        .copied()
-        .filter(|b| b.starts_with(prefix))
-        .collect();
-    (0, matches)
+fn completion_prefix(line: &str, pos: usize) -> Option<&str> {
+    let prefix = line.get(..pos)?;
+    (!prefix.contains(char::is_whitespace)).then_some(prefix)
 }
 
-fn complete_executables(line: &str, _pos: usize, shell: &ShellEnv) -> (usize, Vec<String>) {
-    let mut matches: Vec<String> = Vec::new();
-    for dir in shell.path.split(':') {
-        let Ok(entries) = fs::read_dir(dir) else { continue };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(line) {
-                matches.push(name);
-            }
-        }
-    }
-    (0, matches)
+fn complete_builtin(prefix: &str) -> impl Iterator<Item = String> + '_ {
+    BUILTINS
+        .iter()
+        .copied()
+        .filter(move |b| b.starts_with(prefix))
+        .map(str::to_string)
+}
+
+fn complete_executables<'a>(
+    prefix: &'a str,
+    shell: &'a ShellEnv,
+) -> impl Iterator<Item = String> + 'a {
+    shell
+        .path
+        .split(':')
+        .filter_map(|d| fs::read_dir(d).ok())
+        .flat_map(|entries| entries.flatten())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(move |n| n.starts_with(prefix))
 }
 
 struct ShellHelper{
@@ -271,24 +270,17 @@ impl Completer for ShellHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (_start2, names2) = complete_executables(line, pos, &self.shellenv);
-        let (start, names) = complete_builtin(line, pos);
-        let mut candidates: Vec<Pair> = names
-            .into_iter()
-            .map(|b| Pair {
-                display: b.to_string(),
-                replacement: format!("{} ", b),
+        let Some(prefix) = completion_prefix(line, pos) else {
+            return Ok((pos, vec![]));
+        };
+        let candidates = complete_builtin(prefix)
+            .chain(complete_executables(prefix, &self.shellenv))
+            .map(|name| Pair {
+                display: name.clone(),
+                replacement: format!("{} ", name),
             })
             .collect();
-        let other_candidates: Vec<Pair> = names2
-            .into_iter()
-            .map(|b| Pair {
-                display: b.clone(),
-                replacement: format!("{} ", b),
-            })
-            .collect();
-        candidates.extend(other_candidates);
-        Ok((start, candidates))
+        Ok((0, candidates))
     }
 }
 
@@ -666,29 +658,25 @@ mod tests {
 
     #[test]
     fn test_complete_builtin_unique_prefix_returns_single_match() {
-        assert_eq!(complete_builtin("ech", 3), (0, vec!["echo"]));
-        assert_eq!(complete_builtin("exi", 3), (0, vec!["exit"]));
+        assert_eq!(complete_builtin("ech").collect::<Vec<_>>(), vec!["echo"]);
+        assert_eq!(complete_builtin("exi").collect::<Vec<_>>(), vec!["exit"]);
     }
 
     #[test]
     fn test_complete_builtin_no_match_returns_empty() {
-        let (_, names) = complete_builtin("xyz", 3);
-        assert!(names.is_empty());
+        assert!(complete_builtin("xyz").next().is_none());
     }
 
     #[test]
-    fn test_complete_builtin_after_space_returns_empty() {
-        let (start, names) = complete_builtin("echo ", 5);
-        assert_eq!(start, 5);
-        assert!(names.is_empty());
+    fn test_completion_prefix_after_space_returns_none() {
+        assert_eq!(completion_prefix("echo ", 5), None);
     }
 
     #[test]
     fn test_complete_builtin_shared_prefix_returns_all_matches() {
-        let (start, names) = complete_builtin("e", 1);
-        assert_eq!(start, 0);
-        assert!(names.contains(&"echo"));
-        assert!(names.contains(&"exit"));
+        let names: Vec<String> = complete_builtin("e").collect();
+        assert!(names.iter().any(|n| n == "echo"));
+        assert!(names.iter().any(|n| n == "exit"));
     }
 
     #[test]
