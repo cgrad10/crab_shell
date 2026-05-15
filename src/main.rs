@@ -5,6 +5,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
+
 const BUILTINS: &[&str] = &["echo", "exit", "type", "pwd", "cd"];
 
 #[derive(PartialEq, Debug)]
@@ -47,7 +55,7 @@ impl CommandResult {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ShellEnv {
     path: String,
     home: String,
@@ -224,21 +232,87 @@ fn write_stream(content: &str, redir: Option<&Redirect>, stream: RedirectKind) {
     }
 }
 
-fn read_line() -> String {
-    print!("$ ");
-    io::stdout().flush().unwrap();
-    let mut command = String::new();
-    io::stdin().read_line(&mut command).unwrap();
-    command
+fn completion_prefix(line: &str, pos: usize) -> Option<&str> {
+    let prefix = line.get(..pos)?;
+    (!prefix.contains(char::is_whitespace)).then_some(prefix)
 }
+
+fn complete_builtin(prefix: &str) -> impl Iterator<Item = String> + '_ {
+    BUILTINS
+        .iter()
+        .copied()
+        .filter(move |b| b.starts_with(prefix))
+        .map(str::to_string)
+}
+
+fn complete_executables<'a>(
+    prefix: &'a str,
+    shell: &'a ShellEnv,
+) -> impl Iterator<Item = String> + 'a {
+    shell
+        .path
+        .split(':')
+        .filter_map(|d| fs::read_dir(d).ok())
+        .flat_map(|entries| entries.flatten())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(move |n| n.starts_with(prefix))
+}
+
+struct ShellHelper{
+    shellenv: ShellEnv
+}
+
+impl Completer for ShellHelper {
+    type Candidate = Pair;
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let Some(prefix) = completion_prefix(line, pos) else {
+            return Ok((pos, vec![]));
+        };
+        let candidates = complete_builtin(prefix)
+            .chain(complete_executables(prefix, &self.shellenv))
+            .map(|name| Pair {
+                display: name.clone(),
+                replacement: format!("{} ", name),
+            })
+            .collect();
+        Ok((0, candidates))
+    }
+}
+
+impl Hinter for ShellHelper {
+    type Hint = String;
+}
+impl Highlighter for ShellHelper {}
+impl Validator for ShellHelper {}
+impl Helper for ShellHelper {}
 
 fn main() {
     let shell = ShellEnv {
         path: env::var("PATH").unwrap_or_default(),
         home: env::var("HOME").unwrap_or_default(),
     };
+    let mut editor: Editor<ShellHelper, DefaultHistory> =
+        Editor::new().expect("failed to initialize line editor");
+    let shell_helper = ShellHelper{
+        shellenv: shell.clone()
+    };
+    editor.set_helper(Some(shell_helper));
+
     loop {
-        let command = read_line();
+        let command = match editor.readline("$ ") {
+            Ok(line) => line,
+            Err(ReadlineError::Eof) => break,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(e) => {
+                eprintln!("readline error: {}", e);
+                break;
+            }
+        };
         let result = handle_command(&command, &shell);
         write_stream(&result.stdout, result.redirect.as_ref(), RedirectKind::Stdout);
         write_stream(&result.stderr, result.redirect.as_ref(), RedirectKind::Stderr);
@@ -580,6 +654,29 @@ mod tests {
         write_stream("two\n", Some(&redir), RedirectKind::Stderr); // mismatched stream, no-op for file
         write_stream("three\n", Some(&redir), RedirectKind::Stdout);
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\nthree\n");
+    }
+
+    #[test]
+    fn test_complete_builtin_unique_prefix_returns_single_match() {
+        assert_eq!(complete_builtin("ech").collect::<Vec<_>>(), vec!["echo"]);
+        assert_eq!(complete_builtin("exi").collect::<Vec<_>>(), vec!["exit"]);
+    }
+
+    #[test]
+    fn test_complete_builtin_no_match_returns_empty() {
+        assert!(complete_builtin("xyz").next().is_none());
+    }
+
+    #[test]
+    fn test_completion_prefix_after_space_returns_none() {
+        assert_eq!(completion_prefix("echo ", 5), None);
+    }
+
+    #[test]
+    fn test_complete_builtin_shared_prefix_returns_all_matches() {
+        let names: Vec<String> = complete_builtin("e").collect();
+        assert!(names.iter().any(|n| n == "echo"));
+        assert!(names.iter().any(|n| n == "exit"));
     }
 
     #[test]
